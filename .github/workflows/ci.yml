@@ -1,0 +1,57 @@
+name: Rust checks
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  stable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - run: cargo +stable fmt --check
+      - run: rustfmt +stable --edition 2024 --check tests/support/mock-engine.rs
+      - run: cargo +stable clippy --locked --all-targets -- -D warnings
+      - run: cargo +stable test --locked
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.85.0 --profile minimal
+      - run: cargo +1.85.0 check --locked --all-targets
+      - run: cargo +1.85.0 build --locked
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LARAINIT_TEST_IMAGE: larainit-ci:local
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal
+      - name: Explicit operator image preparation
+        run: docker build -t "$LARAINIT_TEST_IMAGE" .
+      - name: Real native integration (no passing skips)
+        shell: bash
+        run: |
+          mkdir -p evidence
+          cat /etc/os-release > evidence/platform.txt
+          uname -a >> evidence/platform.txt
+          docker version --format '{{json .Server}}' > evidence/server.json
+          docker image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}}' "$LARAINIT_TEST_IMAGE" > evidence/image.txt
+          cargo +stable test --release --locked -- --ignored --nocapture --test-threads=1 2>&1 | tee evidence/integration.log
+          python3 tests/support/pty-check.py "$PWD/target/release/larainit" "$LARAINIT_TEST_IMAGE" --installer 2>&1 | tee evidence/terminal.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: docker-validation
+          path: evidence/
+          retention-days: 14
+          if-no-files-found: warn

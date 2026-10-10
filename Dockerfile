@@ -15,7 +15,7 @@ ENV COMPOSER_ALLOW_SUPERUSER=1
 ENV COMPOSER_HOME=/opt/composer
 ENV PATH="/opt/composer/vendor/bin:${PATH}"
 
-RUN composer global require laravel/installer \
+RUN composer global require laravel/installer:5.32.0 \
     && chmod -R a+rX /opt/composer \
     && chmod 755 /opt/composer/vendor/bin/laravel
 

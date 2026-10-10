@@ -3,3 +3,16 @@ larainit
 art
 README.md
 LICENSE
+target/
+debug/
+release/
+node_modules/
+Dockerfile*
+.dockerignore
+*.log*
+.env*
+coverage/
+.codegraph/
+.opencode/
+.specify/
+specs/
