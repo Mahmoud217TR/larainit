@@ -131,7 +131,10 @@ fn image_identity_platform_and_run_failure_never_reselect_or_provision() {
         .unwrap();
     assert_eq!(output.status.code(), Some(125));
     let calls = fixture.calls();
-    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.len(), 5);
+    assert_eq!(calls[3][0], "stop");
+    assert_eq!(calls[4][0], "rm");
+    assert_eq!(calls[3].last(), calls[4].last());
     assert_eq!(calls[1][5], "custom:tag");
     assert!(calls[2].contains(&format!("sha256:{}", "a".repeat(64)).into()));
     assert!(!calls[2].contains(&"custom:tag".into()));

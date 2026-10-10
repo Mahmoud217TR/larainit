@@ -228,7 +228,6 @@ pub fn observe_with_deadline(
         nonblocking(&stderr)?;
         let mut observation = (Vec::new(), Vec::new());
         let (mut out_eof, mut err_eof, mut total) = (false, false, 0);
-        let mut status = None;
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(signal) = signals.and_then(Signals::signal) {
@@ -239,11 +238,10 @@ pub fn observe_with_deadline(
             }
             drain(&mut stdout, &mut observation.0, &mut out_eof, &mut total)?;
             drain(&mut stderr, &mut observation.1, &mut err_eof, &mut total)?;
-            if status.is_none() {
-                status = child.try_wait().map_err(ProbeFailure::Io)?;
-            }
-            if let Some(status) = status {
-                if out_eof && err_eof {
+            // Keep the leader unreaped while retained pipes may still require group cleanup.
+            // Reaping earlier releases its PID for reuse by an unrelated process group.
+            if out_eof && err_eof {
+                if let Some(status) = child.try_wait().map_err(ProbeFailure::Io)? {
                     return Ok(Observation {
                         status,
                         stdout: observation.0,
@@ -450,6 +448,7 @@ pub fn run_arguments(input: &RunInput<'_>) -> Result<Vec<OsString>, Error> {
 struct Scratch {
     root: PathBuf,
     name: String,
+    directory: std::fs::File,
 }
 
 impl Scratch {
@@ -494,7 +493,24 @@ impl Scratch {
                     "Use an accessible temporary directory; an existing path is never reused",
                 )
             })?;
-        Ok(Self { root, name })
+        use std::os::unix::fs::OpenOptionsExt;
+        let directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
+            .open(&root)
+            .map_err(|cause| {
+                Error::operational(
+                    "open invocation scratch",
+                    root.display().to_string(),
+                    cause,
+                    "Use an accessible temporary directory",
+                )
+            })?;
+        Ok(Self {
+            root,
+            name,
+            directory,
+        })
     }
 
     fn cidfile(&self) -> PathBuf {
@@ -502,11 +518,14 @@ impl Scratch {
     }
 
     fn container_id(&self) -> Result<Option<String>, Error> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let file = match std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-            .open(self.cidfile())
+        let file = match nix::fcntl::openat(
+            &self.directory,
+            "cid",
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+            nix::sys::stat::Mode::empty(),
+        )
+        .map(std::fs::File::from)
+        .map_err(io::Error::from)
         {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -564,7 +583,13 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        match std::fs::remove_file(self.cidfile()) {
+        match nix::unistd::unlinkat(
+            &self.directory,
+            "cid",
+            nix::unistd::UnlinkatFlags::NoRemoveDir,
+        )
+        .map_err(io::Error::from)
+        {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => diagnostic(format_args!("remove invocation cidfile: {error}")),
@@ -699,9 +724,7 @@ fn cleanup(docker: &crate::engine::Docker, scratch: &Scratch, signal: Signal) {
     ]);
     let stopped = observe_with_deadline(&mut stop, None, Duration::from_secs(8));
     if let Ok(output) = &stopped {
-        if output.status.success()
-            || String::from_utf8_lossy(&output.stderr).contains("No such container:")
-        {
+        if String::from_utf8_lossy(&output.stderr).contains("No such container:") {
             return;
         }
     }
@@ -773,6 +796,7 @@ pub fn execute(
     })?;
     if let Some(tty) = tty.as_mut() {
         if let Err(cause) = tty.handoff(&child) {
+            cleanup(docker, &scratch, Signal::SIGTERM);
             let _ = terminate_client(&mut child);
             return Err(cause);
         }
@@ -807,6 +831,12 @@ pub fn execute(
                     .and_then(|value| Signal::try_from(value).ok())
                 {
                     cleanup(docker, &scratch, signal);
+                } else if terminal || !status.success() {
+                    // Detaching returns success without stopping the container. Numeric client
+                    // failures can also leave a created container; --rm only runs after exit.
+                    if matches!(scratch.container_id(), Ok(Some(_))) {
+                        cleanup(docker, &scratch, Signal::SIGTERM);
+                    }
                 }
                 return Ok(crate::error::child_status(status));
             }
@@ -980,5 +1010,58 @@ mod tests {
         assert_eq!(scratch.container_id().unwrap(), Some("a".repeat(64)));
         drop(scratch);
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn observation_keeps_leader_pid_reserved_until_capture_cleanup() {
+        let fixture = test_support::Fixture::new();
+        fixture.write("version-mode", "retain-pipes");
+        thread::scope(|scope| {
+            let observation = scope.spawn(|| {
+                observe_with_deadline(&mut version(&fixture), None, Duration::from_secs(1))
+            });
+            let deadline = Instant::now() + Duration::from_millis(800);
+            let pidfile = fixture.root.join("retained-leader-pid");
+            while !pidfile.exists() {
+                assert!(Instant::now() < deadline);
+                thread::sleep(POLL);
+            }
+            let pid = std::fs::read_to_string(pidfile).unwrap();
+            thread::sleep(Duration::from_millis(150));
+            let reserved = std::fs::read_to_string(format!("/proc/{pid}/stat"));
+            let result = observation.join().unwrap();
+            assert!(matches!(result, Err(ProbeFailure::Timeout)));
+            assert!(
+                reserved.is_ok(),
+                "probe reaped its leader while it still needed to signal the group; PID could be reused"
+            );
+        });
+    }
+
+    #[test]
+    fn replaced_scratch_parent_cannot_redirect_identity_or_delete_another_file() {
+        let scratch = Scratch::new().unwrap();
+        let original = scratch.root.clone();
+        let moved = original.with_extension("moved");
+        let other = test_support::Fixture::new();
+        std::fs::write(scratch.cidfile(), "a".repeat(64)).unwrap();
+        other.write("cid", "b".repeat(64));
+        std::fs::rename(&original, &moved).unwrap();
+        std::os::unix::fs::symlink(&other.root, &original).unwrap();
+        let identity = scratch.container_id().unwrap();
+        drop(scratch);
+        let other_preserved = std::fs::read(other.root.join("cid")).ok();
+        std::fs::remove_file(original).unwrap();
+        std::fs::remove_dir_all(moved).unwrap();
+        assert_eq!(
+            identity,
+            Some("a".repeat(64)),
+            "parent substitution redirected cleanup authorization"
+        );
+        assert_eq!(
+            other_preserved,
+            Some("b".repeat(64).into_bytes()),
+            "scratch cleanup followed a replaced parent and removed unrelated data"
+        );
     }
 }

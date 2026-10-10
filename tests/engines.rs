@@ -7,6 +7,81 @@ use std::time::{Duration, Instant};
 use support::Fixture;
 
 #[test]
+#[ignore = "requires prepared real Docker; controlled cancellation after create before start"]
+fn interruption_removes_a_created_but_never_started_container() {
+    let fixture = Fixture::new();
+    let bin = fixture.install_docker();
+    let docker = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("docker"))
+        .find(|path| path.is_file())
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    fixture.write("forward-docker", docker.to_str().unwrap());
+    fixture.write("run-mode", "create-only");
+    let runtime = fixture.root.join("runtime");
+    fs::create_dir(&runtime).unwrap();
+    let mut child = fixture
+        .real_larainit()
+        .env("MOCK_ROOT", &fixture.root)
+        .env("PATH", &bin)
+        .env("TMPDIR", &runtime)
+        .arg("bash")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !fixture.root.join("run-started").exists() {
+        assert!(Instant::now() < deadline);
+        assert!(child.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let scratch = fs::read_dir(&runtime)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let id = fs::read_to_string(scratch.join("cid")).unwrap();
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(child.id() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(18);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            panic!("interruption cleanup timed out; operator container {id} may remain");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(143));
+    let inspect = std::process::Command::new(&docker)
+        .args(["container", "inspect", "--", id.trim()])
+        .output()
+        .unwrap();
+    if inspect.status.success() {
+        // Test-operator removal of exactly its own leftover, even when the regression fails.
+        assert!(
+            std::process::Command::new(&docker)
+                .args(["rm", "--force", "--volumes", "--", id.trim()])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    assert!(
+        !inspect.status.success(),
+        "docker stop succeeds on 'created' containers but does not trigger --rm; wrapper must remove its captured ID"
+    );
+    assert!(String::from_utf8_lossy(&inspect.stderr).contains("No such"));
+}
+
+#[test]
 #[ignore = "operator creates one test-only group-owned file using container root; run with prepared rootful non-remapped Docker"]
 fn supplementary_group_only_file_is_writable_without_ownership_repair() {
     use std::os::unix::fs::MetadataExt;

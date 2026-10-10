@@ -12,6 +12,7 @@ import pty
 import re
 import select
 import signal
+import subprocess
 import struct
 import sys
 import tempfile
@@ -24,11 +25,13 @@ root = Path(tempfile.mkdtemp(prefix='larainit-pty-', dir=os.environ.get('TMPDIR'
 results = []
 
 
-def run(name, arguments, input_bytes=None, redirect=False, closed=False, interrupt=False, prompts=()):
+def run(name, arguments, input_bytes=None, redirect=False, closed=False, interrupt=False, prompts=(), capture_id=False):
     workspace = root / name
     workspace.mkdir()
+    runtime = workspace / 'runtime'
+    runtime.mkdir()
     env = os.environ.copy()
-    env.update(XDG_CONFIG_HOME=str(workspace / 'config'), XDG_CACHE_HOME=str(root / 'cache'), TERM='xterm-256color')
+    env.update(XDG_CONFIG_HOME=str(workspace / 'config'), XDG_CACHE_HOME=str(root / 'cache'), TMPDIR=str(runtime), TERM='xterm-256color')
     command = [binary, '--image', image, *arguments]
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 120, 0, 0))
@@ -56,6 +59,7 @@ def run(name, arguments, input_bytes=None, redirect=False, closed=False, interru
     start = time.monotonic()
     status = None
     answered = []
+    container_id = None
     while status is None:
         if select.select([master], [], [], 0.05)[0]:
             try:
@@ -72,7 +76,9 @@ def run(name, arguments, input_bytes=None, redirect=False, closed=False, interru
         if not sent and interrupt and (workspace / 'ready').exists():
             os.write(master, b'\x03')
             sent = True
-        elif not sent and input_bytes is not None and time.monotonic() - start > 0.5:
+        elif not sent and input_bytes is not None and time.monotonic() - start > 0.5 and (not capture_id or (workspace / 'ready').exists()):
+            if capture_id:
+                container_id = next(runtime.glob('larainit-*/cid')).read_text().strip()
             os.write(master, input_bytes)
             sent = True
         exited, wait = os.waitpid(pid, os.WNOHANG)
@@ -86,6 +92,8 @@ def run(name, arguments, input_bytes=None, redirect=False, closed=False, interru
     os.close(slave)
     (workspace / 'terminal.log').write_bytes(output)
     result = {'name': name, 'command': command, 'status': status, 'terminal_restored': before == after}
+    if container_id:
+        result['container_id'] = container_id
     if prompts:
         result['answered_prompts'] = answered
         assert answered == list(prompts), 'actual installer prompts were not answered'
@@ -105,6 +113,12 @@ result, output = run('ctrl-c', ['bash', '-c', "trap 'exit 42' INT TERM; touch re
 assert result['status'] == 42, result
 result, output = run('bare-bash', [], b'printf "native-shell-ok\\n"; exit 0\n')
 assert result['status'] == 0 and b'native-shell-ok' in output, result
+result, output = run('detached-shell', ['bash', '-c', 'touch ready; while :; do sleep 0.1; done'], b'\x10\x11', capture_id=True)
+assert result['status'] == 0, result
+inspection = subprocess.run(['docker', 'container', 'inspect', '--', result['container_id']], capture_output=True, timeout=5)
+if inspection.returncode == 0:
+    subprocess.run(['docker', 'rm', '--force', '--volumes', '--', result['container_id']], check=True, capture_output=True, timeout=10)
+assert inspection.returncode != 0 and b'No such' in inspection.stderr, 'detach left this invocation container running'
 if '--installer' in sys.argv[3:]:
     result, output = run('installer', ['new', 'my-app', '--database=sqlite', '--phpunit', '--no-node', '--no-boost'],
                          prompts=('Do you want to use a starter kit?', 'Which frontend stack do you want to build on?'))

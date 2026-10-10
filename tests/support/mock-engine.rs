@@ -84,6 +84,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = mode.trim();
     let behavior = mode.strip_prefix("running-").unwrap_or(mode);
     if let Ok(docker) = fs::read_to_string(root.join("forward-docker")) {
+        if operation == "run" && mode == "create-only" {
+            let mut create = args.clone();
+            create[0] = "create".into();
+            create.retain(|argument| argument != "--sig-proxy=false");
+            let status = Command::new(docker.trim()).args(create).status()?;
+            if !status.success() {
+                process::exit(status.code().unwrap_or(1));
+            }
+            fs::write(
+                root.join("run-started"),
+                b"created, deliberately not started",
+            )?;
+            loop {
+                thread::sleep(Duration::from_secs(60));
+            }
+        }
         if operation == "run" {
             if let Ok(id) = fs::read_to_string(root.join("remove-before-run")) {
                 let status = Command::new(docker.trim())
@@ -126,6 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if mode == "retain-pipes" {
+        fs::write(root.join("retained-leader-pid"), process::id().to_string())?;
         let _child = Command::new(env::current_exe()?)
             .arg("--retain-pipe")
             .spawn()?;

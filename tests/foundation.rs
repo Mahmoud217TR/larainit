@@ -83,7 +83,10 @@ fn safe_execution_inherits_streams_status_and_cleans_only_private_scratch() {
     assert_eq!(output.stdout, b"out\n");
     assert_eq!(output.stderr, b"err\n");
     let calls = fixture.calls();
-    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.len(), 5);
+    assert_eq!(calls[3][0], "stop");
+    assert_eq!(calls[4][0], "rm");
+    assert_eq!(calls[3].last(), calls[4].last());
     let run = &calls[2];
     assert_eq!(run[0], "run");
     assert!(run.contains(&"--pull=never".into()));

@@ -130,6 +130,7 @@ fn auto_removal_and_name_collisions_never_broaden_cleanup() {
             .iter()
             .filter(|call| call[0] == "stop")
             .count(),
-        1
+        2
     );
+    assert!(!fixture.calls().iter().any(|call| call[0] == "rm"));
 }
