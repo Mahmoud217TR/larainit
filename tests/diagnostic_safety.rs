@@ -3,6 +3,63 @@ use std::fs;
 use support::Fixture;
 
 #[test]
+fn engine_and_doctor_reads_preserve_existing_user_state_and_never_probe_uncertified_podman() {
+    for action in ["doctor", "engine"] {
+        for preference in ["auto", "docker", "podman"] {
+            let fixture = Fixture::new();
+            let bin = fixture.install_docker();
+            fixture.install_engine("podman");
+            fixture.install_engine("sqlite3");
+            let config = format!("engine='{preference}'\nimage='saved:tag'\n");
+            fixture.write("config/larainit/config.toml", &config);
+            for path in [
+                "workspace-sentinel",
+                "cache/larainit/composer/sentinel",
+                "cache/larainit/npm/sentinel",
+                "podman/db.sql",
+                "podman/db.sql-wal",
+                "podman/db.sql-shm",
+            ] {
+                fixture.write(path, "untouched");
+            }
+            let output = fixture
+                .larainit()
+                .env("PATH", bin)
+                .arg(action)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(if preference == "podman" { 1 } else { 0 })
+            );
+            for call in fixture.calls() {
+                assert!(
+                    matches!(call[0].to_str(), Some("version" | "image")),
+                    "unexpected diagnostic request: {call:?}"
+                );
+            }
+            assert!(fixture.engine_calls("podman").is_empty());
+            assert!(fixture.engine_calls("sqlite3").is_empty());
+            assert!(!fixture.root.join("unexpected-command").exists());
+            assert_eq!(
+                fs::read(fixture.root.join("config/larainit/config.toml")).unwrap(),
+                config.as_bytes()
+            );
+            for path in [
+                "workspace-sentinel",
+                "cache/larainit/composer/sentinel",
+                "cache/larainit/npm/sentinel",
+                "podman/db.sql",
+                "podman/db.sql-wal",
+                "podman/db.sql-shm",
+            ] {
+                assert_eq!(fs::read(fixture.root.join(path)).unwrap(), b"untouched");
+            }
+        }
+    }
+}
+
+#[test]
 fn doctor_requests_only_bounded_observations_and_never_prepares_user_paths() {
     for mode in ["", "exit=1", "hang", "flood"] {
         let fixture = Fixture::new();

@@ -1,0 +1,38 @@
+{
+  "host": {
+    "arch": "amd64",
+    "os": "linux",
+    "serviceIsRemote": false,
+    "databaseBackend": "sqlite",
+    "distribution": {"distribution": "ubuntu", "version": "26.04"},
+    "cgroupManager": "systemd",
+    "cgroupVersion": "v2",
+    "conmon": {"path": "/usr/bin/conmon"},
+    "networkBackend": "netavark",
+    "networkBackendInfo": {
+      "backend": "netavark",
+      "path": "/usr/lib/podman/netavark",
+      "dns": {"path": "/usr/lib/podman/aardvark-dns"}
+    },
+    "ociRuntime": {"name": "crun", "path": "/usr/bin/crun"},
+    "pasta": {"executable": "/usr/bin/pasta"},
+    "slirp4netns": {"executable": "/usr/bin/slirp4netns"},
+    "security": {
+      "apparmorEnabled": false,
+      "rootless": true,
+      "seccompEnabled": true,
+      "seccompProfilePath": "/usr/share/containers/seccomp.json",
+      "selinuxEnabled": false
+    },
+    "remoteSocket": {"path": "/run/user/1001/podman/podman.sock", "exists": true}
+  },
+  "store": {
+    "configFile": "/home/larainit-podman-test/.config/containers/storage.conf",
+    "graphDriverName": "overlay",
+    "graphRoot": "/home/larainit-podman-test/.local/share/containers/storage",
+    "runRoot": "/run/user/1001/containers",
+    "volumePath": "/home/larainit-podman-test/.local/share/containers/storage/volumes",
+    "transientStore": false
+  },
+  "version": {"Version": "5.7.0", "OsArch": "linux/amd64", "Os": "linux"}
+}

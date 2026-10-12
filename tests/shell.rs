@@ -7,11 +7,11 @@ use support::Fixture;
 fn bare_nonterminal_and_reserved_names_are_local_failures() {
     let fixture = Fixture::new();
     let bin = fixture.install_docker();
-    for (arguments, status) in [
-        (vec![], 2),
-        (vec!["engine"], 1),
-        (vec!["build"], 1),
-        (vec!["config"], 1),
+    for (arguments, status, message) in [
+        (vec![], 2, "supply a command"),
+        (vec!["build"], 2, "larainit build --context"),
+        (vec!["build", "--context", "."], 1, "local build resource"),
+        (vec!["config"], 1, "not yet supported"),
     ] {
         let output = fixture
             .larainit()
@@ -21,11 +21,7 @@ fn bare_nonterminal_and_reserved_names_are_local_failures() {
             .unwrap();
         assert_eq!(output.status.code(), Some(status));
         let error = String::from_utf8_lossy(&output.stderr);
-        assert!(error.contains(if status == 2 {
-            "supply a command"
-        } else {
-            "not yet supported"
-        }));
+        assert!(error.contains(message));
     }
     assert!(fixture.calls().is_empty());
     assert!(!fixture.root.join("cache").exists());

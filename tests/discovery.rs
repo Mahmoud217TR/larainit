@@ -90,6 +90,37 @@ fn executable_removed_after_discovery_does_not_fall_back() {
 }
 
 #[test]
+fn auto_reports_both_readiness_failures_but_explicit_choices_are_strict() {
+    for preference in ["auto", "docker", "podman"] {
+        let fixture = Fixture::new();
+        let bin = fixture.install_docker();
+        fixture.install_engine("podman");
+        fixture.write("version-mode", "exit=1");
+        fixture.write("version-stderr", "Docker unavailable");
+        let output = fixture
+            .larainit()
+            .env("PATH", bin)
+            .args(["--engine", preference, "engine"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        match preference {
+            "auto" => assert!(
+                stderr.contains("Docker unavailable") && stderr.contains("Podman"),
+                "{stderr}"
+            ),
+            "docker" => assert!(!stderr.contains("Podman"), "{stderr}"),
+            "podman" => assert!(fixture.calls().is_empty()),
+            _ => unreachable!(),
+        }
+        assert!(fixture.engine_calls("podman").is_empty());
+        assert!(!fixture.root.join("cache").exists());
+        assert!(!fixture.root.join("config").exists());
+    }
+}
+
+#[test]
 fn image_identity_platform_and_run_failure_never_reselect_or_provision() {
     for response in [
         "null".into(),

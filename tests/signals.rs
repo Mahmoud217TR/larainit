@@ -47,6 +47,60 @@ fn interrupted(
 }
 
 #[test]
+fn created_but_never_started_failure_requires_valid_cid_before_removal() {
+    for behavior in ["normal", "missing-cid", "bad-cid"] {
+        let fixture = Fixture::new();
+        let bin = fixture.install_docker();
+        fixture.install_engine("podman");
+        fixture.write("run-mode", "created-exit=125");
+        fixture.write("run-cid-behavior", behavior);
+        fixture.write("unrelated-container", "untouched");
+        let output = fixture
+            .larainit()
+            .env("PATH", bin)
+            .args(["--engine", "docker", "php"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(125));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("workload never started"));
+        let calls = fixture.calls();
+        assert_eq!(
+            calls.len(),
+            if behavior == "normal" { 5 } else { 3 },
+            "{calls:?}"
+        );
+        assert_eq!(calls[2][0], "run");
+        if behavior == "normal" {
+            let id = "a".repeat(64);
+            assert_eq!(
+                calls[3],
+                ["stop", "--signal", "SIGTERM", "--timeout", "5", "--", &id]
+                    .map(std::ffi::OsString::from)
+            );
+            assert_eq!(
+                calls[4],
+                ["rm", "--force", "--volumes", "--", &id].map(std::ffi::OsString::from)
+            );
+        }
+        assert_eq!(
+            std::fs::read(fixture.root.join("container-state")).unwrap(),
+            if behavior == "normal" {
+                b"removed".as_slice()
+            } else {
+                b"created".as_slice()
+            }
+        );
+        assert!(!fixture.root.join("run-started").exists());
+        assert!(fixture.engine_calls("podman").is_empty());
+        assert_eq!(
+            std::fs::read(fixture.root.join("unrelated-container")).unwrap(),
+            b"untouched"
+        );
+        assert!(!fixture.root.join("unexpected-command").exists());
+    }
+}
+
+#[test]
 fn missing_malformed_and_late_identity_never_authorize_guessed_cleanup() {
     for mode in ["running-missing-cid", "running-bad-cid", "running-late-cid"] {
         let fixture = Fixture::new();

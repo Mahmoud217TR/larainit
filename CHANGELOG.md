@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0 — In development (not release-certified)
+
+- Add local `engine` read/set, strict saved-value validation, preserved recognized image settings,
+  coordinated atomic saves and explicit postcommit durability/unavailable-readiness statuses.
+- Add required-context local Docker builds with native file paths, independent tags, streaming
+  cancellation and private IID/immutable-image/tag verification. Artifacts can remain after failure;
+  no ordinary command implicitly pulls/builds or falls back after selection.
+- Add engine-specific image/run/cleanup adapters and independent diagnostic candidate reports.
+  Add candidate checks for fingerprinted Ubuntu 26.04/Podman 5.7.0 default prepared
+  rootless/crun/SQLite state, prepared startup paths, absent deletion leftovers,
+  nonrecovering permanent/volatile storage metadata and the packaged seccomp profile.
+  XFS-backed overlay is refused before observation to avoid quota initialization.
+  Info helper lookup/fingerprints (including pasta's AVX2 companion), reported paths
+  and dpkg configuration/environment are candidate-checked; execution remains uncertified.
+  Passive pause-root/mount-view/propagation guards, canonical PID parsing and
+  pre-exec-hook refusal are implemented; their dedicated-account rerun is pending.
+  Prepared systemd binfmt automount stacks are compared by verified parent chain;
+  untriggered/ambiguous and storage/root stacks remain refused.
+  Namespace-filesystem root IDs are parsed separately from absolute mount paths,
+  preserving exact object identities and field-specific refusal diagnostics.
+  Podman remains disabled pending startup/security and live fixture certification.
+- Configuration compatibility: invalid saved values now fail even when overridden. Only `config`
+  remains reserved; `engine` and `build` are local builtins. Build-local engine overrides global selection.
+- Fresh local Docker integrations, both-signal build cancellation/tag-race, PTY/installer and MSRV
+  checks passed on 2026-10-12. Candidate SQLite metadata reads use a tested read-only Bubblewrap
+  sandbox; real rootless workload certification, cold-store builds and hosted CI remain open.
+  Unsupported platform categories and Feature 001's separate acceptance gates remain open.
+
 ## 0.2.0 — Unreleased
 
 Native implementation and local Ubuntu/Docker story checks are complete. Final feature acceptance

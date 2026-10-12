@@ -9,17 +9,22 @@ use support::Fixture;
 #[test]
 fn local_routes_do_not_load_configuration_probe_or_write() {
     let fixture = Fixture::new();
-    fs::create_dir_all(fixture.root.join("config/larainit")).unwrap();
     fixture.write("config/larainit/config.toml", "unknown = 'private value'");
     for (args, status) in [
         (vec!["--help"], 0),
         (vec!["--version"], 0),
-        (vec!["--engine", "podman", "php"], 2),
+        (vec!["engine", "--help"], 0),
+        (vec!["build", "--help"], 0),
+        (vec!["doctor", "--help"], 0),
+        (vec!["--engine", "unknown", "php"], 2),
         (vec!["--unknown"], 2),
         (vec!["doctor", "extra"], 2),
         (vec![], 2),
         (vec!["engine"], 1),
-        (vec!["build"], 1),
+        (vec!["engine", "podman"], 1),
+        (vec!["engine", "invalid"], 2),
+        (vec!["build"], 2),
+        (vec!["build", "--context", "."], 1),
         (vec!["config"], 1),
     ] {
         let output = fixture
@@ -33,6 +38,40 @@ fn local_routes_do_not_load_configuration_probe_or_write() {
     }
     assert!(fixture.calls().is_empty());
     assert!(!fixture.root.join("cache").exists());
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("config/larainit/config.toml")).unwrap(),
+        "unknown = 'private value'"
+    );
+}
+
+#[test]
+fn builds_without_local_dockerfile_fail_without_engine_or_state_changes() {
+    for args in [
+        vec!["build", "--context", ".", "--tag", "custom:tag"],
+        vec![
+            "--engine",
+            "docker",
+            "build",
+            "--context",
+            ".",
+            "--engine",
+            "podman",
+        ],
+    ] {
+        let fixture = Fixture::new();
+        let bin = fixture.install_docker();
+        let output = fixture
+            .larainit()
+            .env("PATH", bin)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("local build resource"));
+        assert!(fixture.calls().is_empty());
+        assert!(!fixture.root.join("config").exists());
+        assert!(!fixture.root.join("cache").exists());
+    }
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use crate::{
     cli::Overrides,
-    config::{self, Engine, PathState},
+    config::{self, PathState},
     engine,
     error::Error,
     image, runner,
@@ -74,14 +74,15 @@ pub fn run(overrides: &Overrides) -> Result<i32, Error> {
             report.add(
                 "success",
                 "effective engine",
-                format!(
-                    "{} -> Docker (source: {})",
-                    match settings.engine {
-                        Engine::Auto => "auto",
-                        Engine::Docker => "docker",
-                    },
-                    settings.engine_source
-                ),
+                format!("{} (source: {})", settings.engine, settings.engine_source),
+            );
+            report.add(
+                "info",
+                "saved engine",
+                settings
+                    .saved_engine
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "not set (auto default)".into()),
             );
             report.add(
                 "success",
@@ -95,15 +96,53 @@ pub fn run(overrides: &Overrides) -> Result<i32, Error> {
     let signals = runner::Signals::register()?;
     match engine::discover(std::env::var_os("PATH").as_deref()) {
         Ok(path) => report.add("success", "Docker executable", path.display()),
-        Err(cause) => report.fail("Docker executable", &cause),
+        Err(cause) => report.add("info", "Docker executable", cause),
     }
     if let Ok(settings) = &settings {
-        match engine::assess(Some(&signals)) {
+        let mut docker = Some(engine::assess(Some(&signals)));
+        let mut podman = Some(engine::assess_preference(
+            config::EnginePreference::Podman,
+            Some(&signals),
+        ));
+        for (label, candidate) in [
+            ("Docker server", &docker),
+            ("Podman profile/readiness", &podman),
+        ] {
+            match candidate {
+                Some(Ok(selected)) => report.add(
+                    "info",
+                    label,
+                    format!("{}; candidate observation only", selected.version),
+                ),
+                Some(Err(cause)) => {
+                    report.add("info", label, format!("unavailable/not checked: {cause}"))
+                }
+                None => {}
+            }
+        }
+        match engine::select_ready(settings.engine, |kind| {
+            let outcome = match kind {
+                engine::EngineKind::Docker => docker.take(),
+                engine::EngineKind::Podman => podman.take(),
+            };
+            outcome.unwrap_or_else(|| {
+                Err(Error::operational(
+                    "select diagnostic candidate",
+                    kind.to_string(),
+                    "candidate already consumed",
+                    "Retry diagnostics; no repeated probe is attempted",
+                ))
+            })
+        }) {
             Ok(docker) => {
+                report.add("info", "selection reason", docker.selection_reason);
                 report.add(
                     "success",
-                    "Docker server",
-                    format!("{} (effective configured endpoint/context)", docker.version),
+                    "selected engine",
+                    format!(
+                        "{} {} (effective configured endpoint/store)",
+                        docker.kind, docker.version
+                    ),
                 );
                 match image::inspect(&docker, &settings.image, Some(&signals)) {
                     Ok(image) => report.add(
@@ -118,8 +157,12 @@ pub fn run(overrides: &Overrides) -> Result<i32, Error> {
                 }
             }
             Err(cause) => {
-                report.fail("Docker server", &cause);
-                report.add("not checked", "local image", "Docker server is unavailable");
+                report.fail("selected engine", &cause);
+                report.add(
+                    "not checked",
+                    "local image",
+                    "selected engine is unavailable",
+                );
             }
         }
     } else {
@@ -127,6 +170,11 @@ pub fn run(overrides: &Overrides) -> Result<i32, Error> {
             "not checked",
             "Docker server",
             "effective settings could not be resolved; no engine probe is authorized",
+        );
+        report.add(
+            "not checked",
+            "Podman profile/readiness",
+            "effective settings could not be resolved; no engine or metadata probe is authorized",
         );
         report.add(
             "not checked",
@@ -157,7 +205,8 @@ pub fn run(overrides: &Overrides) -> Result<i32, Error> {
             );
         }
     }
-    report.add("info","inspection boundary","normal Docker-owned bookkeeping and user-configured socket activation may occur; no explicit service management, containers, image provisioning or user-state writes are requested. Permission observations do not guarantee future writes");
+    report.add("info","inspection boundary","normal engine-owned bookkeeping and user-configured socket activation may occur; no explicit service management, containers, image provisioning or user-state writes are requested. Permission observations do not guarantee future writes");
+    report.add("info", "Podman support boundary", "no certified profile is enabled; Ubuntu 26.04/Podman 5.7.0 candidate checks await live fixture certification. Cold/unknown/refresh-required state is not probed or repaired; concurrent configuration/storage changes and untested runtime/mapping/mount/security modes are unsupported/unverified");
     let mut stdout = std::io::stdout().lock();
     for line in report.lines {
         writeln!(stdout, "{line}").map_err(|cause| {

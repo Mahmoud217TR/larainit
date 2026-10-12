@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -28,7 +28,22 @@ impl Fixture {
     }
 
     pub fn write(&self, name: &str, value: impl AsRef<[u8]>) {
-        fs::write(self.root.join(name), value).unwrap();
+        let path = self.root.join(name);
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path.parent().unwrap())
+            .unwrap();
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap()
+            .write_all(value.as_ref())
+            .unwrap();
     }
 
     pub fn docker(&self) -> Command {
@@ -38,7 +53,16 @@ impl Fixture {
     }
 
     pub fn calls(&self) -> Vec<Vec<OsString>> {
-        let bytes = fs::read(self.root.join("argv.bin")).unwrap_or_default();
+        self.engine_calls("docker")
+    }
+
+    pub fn engine_calls(&self, engine: &str) -> Vec<Vec<OsString>> {
+        let root = match engine {
+            "docker" => self.root.clone(),
+            "podman" | "sqlite3" => self.root.join(engine),
+            _ => panic!("unsupported fixture executable"),
+        };
+        let bytes = fs::read(root.join("argv.bin")).unwrap_or_default();
         let mut bytes = bytes.as_slice();
         let mut result = Vec::new();
         while !bytes.is_empty() {
@@ -61,7 +85,17 @@ impl Fixture {
     pub fn install_docker(&self) -> PathBuf {
         let bin = self.root.join("bin");
         fs::create_dir(&bin).unwrap();
-        fs::copy(mock_binary(), bin.join("docker")).unwrap();
+        // No writable executable descriptor for parallel child spawns to inherit.
+        fs::hard_link(mock_binary(), bin.join("docker")).unwrap();
+        bin
+    }
+
+    pub fn install_engine(&self, engine: &str) -> PathBuf {
+        assert!(matches!(engine, "podman" | "sqlite3"));
+        let bin = self.root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(self.root.join(engine)).unwrap();
+        fs::hard_link(mock_binary(), bin.join(engine)).unwrap();
         bin
     }
 
@@ -85,6 +119,12 @@ impl Fixture {
     }
 
     pub fn real_larainit(&self) -> Command {
+        let image =
+            std::env::var("LARAINIT_TEST_IMAGE").unwrap_or_else(|_| "larainit:latest".into());
+        self.real_larainit_with_image(&image)
+    }
+
+    pub fn real_larainit_with_image(&self, image: &str) -> Command {
         let docker_config = std::env::var_os("DOCKER_CONFIG")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -93,13 +133,11 @@ impl Fixture {
                 )
                 .join(".docker")
             });
-        let image =
-            std::env::var("LARAINIT_TEST_IMAGE").unwrap_or_else(|_| "larainit:latest".into());
         let mut command = self.larainit();
         command
             .env_remove("MOCK_ROOT")
             .env("DOCKER_CONFIG", docker_config)
-            .args(["--engine", "docker", "--image", &image]);
+            .args(["--engine", "docker", "--image", image]);
         command
     }
 }
